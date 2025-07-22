@@ -1,8 +1,10 @@
+форк https://github.com/butorov/sentry-telegram
+
 # Sentry Telegram Plus
 
 Позволяет управлять тем, в какие каналы будут падать сообщения. Поддерживает треды.
 
-Установка / переустановка старой версии
+Установка / переустановка старой версии (это неправильный подход, подходит для отладки), правильный подход через sentry/enhance-image.sh https://develop.sentry.dev/self-hosted/configuration/
 
 ```
 pip uninstall sentry-telegram-plus
