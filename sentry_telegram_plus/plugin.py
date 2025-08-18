@@ -1,4 +1,3 @@
-# coding: utf-8
 from __future__ import annotations
 import json
 import logging
@@ -46,6 +45,26 @@ class ChannelsConfigJson(TypedDict):
     channels: List[ChannelConfig]
 
 
+def validate_api_origin(value: str, **kwargs):
+    if not (value.startswith("http://") or value.startswith("https://")):
+        raise ValidationError(
+            _("Telegram API origin must be a valid URL starting with http:// or https://.")
+        )
+    return value
+
+
+def validate_channels_config_json(value: str, **kwargs):
+    if not value:
+        return value
+
+    try:
+        json.loads(value)
+    except json.JSONDecodeError:
+        raise ValidationError(_("Invalid JSON format. Please check for syntax errors."))
+    except (TypeError, ValueError) as e:
+        raise ValidationError(_(f"Invalid JSON data: {e}"))
+    return value
+
 class TelegramNotificationsOptionsForm(notify.NotificationConfigurationForm):
     api_origin = forms.CharField(
         label=_("Telegram API origin"),
@@ -78,16 +97,6 @@ class TelegramNotificationsOptionsForm(notify.NotificationConfigurationForm):
         required=True,
     )
 
-    def clean_api_origin(self):
-        value = self.cleaned_data["api_origin"]
-        if not (value.startswith("http://") or value.startswith("https://")):
-            raise ValidationError(
-                _(
-                    "Telegram API origin must be a valid URL starting with http:// or https://."
-                )
-            )
-        return value
-
 
 class TelegramNotificationsPlugin(notify.NotificationPlugin):
     title = "Telegram Notifications Plus"
@@ -109,6 +118,10 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
 
     project_conf_form = TelegramNotificationsOptionsForm
 
+    def __init__(self):
+        super().__init__()
+        self._regex_cache: Dict[str, re.Pattern] = {}
+
     def is_configured(self, project, **kwargs) -> bool:
         """Проверяет, настроен ли плагин для проекта."""
         return bool(self.get_option('api_origin', project) and self.get_option('channels_config_json', project))
@@ -123,7 +136,7 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
                 'label': _('Telegram API origin'),
                 'type': 'text',
                 'placeholder': 'https://api.telegram.org',
-                'validators': [],
+                'validators': [validate_api_origin],
                 'required': True,
                 'default': 'https://api.telegram.org',
                 'help': _('The base URL for the Telegram Bot API. Defaults to https://api.telegram.org.')
@@ -138,7 +151,7 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
                     'If no filters are specified for a channel, it acts as a default fallback. '
                     'Example: <pre>{&quot;api_origin&quot;: &quot;https://api.telegram.org&quot;, &quot;channels&quot;: [{&quot;api_token&quot;: &quot;YOUR_BOT_TOKEN&quot;, &quot;receivers&quot;: &quot;-123456789;2&quot;, &quot;template&quot;: &quot;&quot;, &quot;filters&quot;: [{&quot;type&quot;:&quot;regex__message&quot;, &quot;value&quot;: &quot;.*error.*&quot;}]}]}</pre>'
                 ),
-                'validators': [],
+                'validators': [validate_channels_config_json],
                 'required': True,
             },
             {
@@ -216,7 +229,7 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
         event_tags.update({k: v for k, v in event.tags})
 
         escaped_title = self._escape_markdown_v1(truncatechars(event.title, EVENT_TITLE_MAX_LENGTH))
-        escaped_event_message = self._escape_markdown_v1(event.message or "пустое сообщение :(")
+        escaped_event_message = self._escape_markdown_v1(event.message or "")
 
         message_params = {
             "title": escaped_title,
@@ -288,33 +301,64 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
                 f"Failed to send message to chat_id {chat_id}: {e}", exc_info=True
             )
 
+    def _get_compiled_regex(self, pattern: str) -> Optional[re.Pattern]:
+        if pattern not in self._regex_cache:
+            try:
+                self._regex_cache[pattern] = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                logger.error(f"Invalid regex pattern '{pattern}': {e}")
+                return None
+        return self._regex_cache.get(pattern)
+
+    def _search_in_json(self, data: Union[Dict, list, Any], regex_pattern: str) -> bool:
+        """
+        Рекурсивно ищет в словаре или списке совпадение с регулярным выражением.
+        """
+        pattern = self._get_compiled_regex(regex_pattern)
+        if not pattern:
+            return False
+
+        def _recursive_search(obj: Any) -> bool:
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(key, str) and pattern.search(key):
+                        return True
+                    if _recursive_search(value):
+                        return True
+            elif isinstance(obj, list):
+                for item in obj:
+                    if _recursive_search(item):
+                        return True
+            elif isinstance(obj, str):
+                if pattern.search(obj):
+                    return True
+            return False
+
+        return _recursive_search(data)
+
+
     def _match_filter(self, event: Any, filter_type: str, filter_value: str) -> bool:
         """Проверяет, соответствует ли событие заданному фильтру."""
         logger.info(f"_match_filter:\t type='{filter_type}', value='{filter_value}'")
 
         if filter_type == "regex__message":
-            message_content = event.message or ""
-            match = bool(re.search(filter_value, message_content, re.IGNORECASE))
-            return match
+            return self._check_regex_match(event.message or "", filter_value)
         elif filter_type == "regex__title":
-            title_content = event.title or ""
-            match = bool(re.search(filter_value, title_content, re.IGNORECASE))
-            return match
+            return self._check_regex_match(event.title or "", filter_value)
         elif filter_type.startswith("tag__"):
             tag_name = filter_type.split("__", 1)[1]
             tag_value = dict(event.tags).get(tag_name)
-            match = bool(tag_value and re.search(filter_value, tag_value, re.IGNORECASE))
-            return match
+            return self._check_regex_match(tag_value, filter_value)
         elif filter_type == "level":
-            match = (event.level == filter_value)
-            return match
+            return event.level == filter_value
         elif filter_type == "project_slug":
-            match = (event.project and event.project.slug == filter_value)
-            return match
+            return event.project and event.project.slug == filter_value
         elif filter_type == "value__tag":
             tags_dict = dict(event.tags)
-            match = (filter_value in tags_dict.values())
-            return match
+            return filter_value in tags_dict.values()
+        elif filter_type == "event_raw_regex":
+            raw_data = event.get_raw_data()
+            return self._search_in_json(raw_data, filter_value)
         logger.info(f"Unsupported filter: {filter_type}.")
         return False
 
