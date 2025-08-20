@@ -52,17 +52,45 @@ def validate_api_origin(value: str, **kwargs):
         )
     return value
 
+def _validate_recursive_filters(filters: Any, path: str):
+    """
+    Рекурсивно проверяет все фильтры и группы фильтров на корректность.
+    Выбрасывает ValidationError, если находит некорректный regex.
+    """
+    if isinstance(filters, list):
+        for i, f in enumerate(filters):
+            new_path = f"{path}[{i}]"
+            _validate_recursive_filters(f, new_path)
+    elif isinstance(filters, dict):
+        if "type" in filters and "value" in filters:
+            if filters["type"].startswith("regex__"):
+                try:
+                    re.compile(filters["value"])
+                except re.error as e:
+                    raise ValidationError(
+                        _(f"Invalid regex pattern '{filters['value']}' in filter at {path}: {e}")
+                    )
+        elif "and_filters" in filters:
+            _validate_recursive_filters(filters["and_filters"], f"{path}.and_filters")
+        elif "or_filters" in filters:
+            _validate_recursive_filters(filters["or_filters"], f"{path}.or_filters")
 
 def validate_channels_config_json(value: str, **kwargs):
     if not value:
         return value
 
     try:
-        json.loads(value)
+        config: ChannelsConfigJson = json.loads(value)
     except json.JSONDecodeError:
         raise ValidationError(_("Invalid JSON format. Please check for syntax errors."))
     except (TypeError, ValueError) as e:
         raise ValidationError(_(f"Invalid JSON data: {e}"))
+    if "channels" in config and isinstance(config["channels"], list):
+        try:
+            _validate_recursive_filters(config["channels"], "channels")
+        except ValidationError as e:
+            raise e
+
     return value
 
 class TelegramNotificationsOptionsForm(notify.NotificationConfigurationForm):
