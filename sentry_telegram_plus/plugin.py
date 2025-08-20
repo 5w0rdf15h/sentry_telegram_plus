@@ -54,26 +54,23 @@ def validate_api_origin(value: str, **kwargs):
 
 def _validate_recursive_filters(filters: Any, path: str):
     """
-    Рекурсивно проверяет все фильтры и группы фильтров на корректность.
-    Выбрасывает ValidationError, если находит некорректный regex.
+    Рекурсивно проверяет все фильтры и группы фильтров в конфиге на корректность.
     """
     if isinstance(filters, list):
         for i, f in enumerate(filters):
-            new_path = f"{path}[{i}]"
-            _validate_recursive_filters(f, new_path)
+            _validate_recursive_filters(f, f"{path}[{i}]")
     elif isinstance(filters, dict):
         if "type" in filters and "value" in filters:
-            if filters["type"].startswith("regex__"):
+            if filters["type"].startswith("regex__") or "raw_regex" in filters["type"]:
                 try:
                     re.compile(filters["value"])
                 except re.error as e:
-                    raise ValidationError(
-                        _(f"Invalid regex pattern '{filters['value']}' in filter at {path}: {e}")
-                    )
-        elif "and_filters" in filters:
-            _validate_recursive_filters(filters["and_filters"], f"{path}.and_filters")
-        elif "or_filters" in filters:
-            _validate_recursive_filters(filters["or_filters"], f"{path}.or_filters")
+                    error_message = f"Invalid regex pattern '{filters['value']}' in filter at {path}: {e}"
+                    logger.info(error_message)
+                    raise ValidationError(error_message)
+        for key, value in filters.items():
+            if isinstance(value, (list, dict)):
+                _validate_recursive_filters(value, f"{path}.{key}")
 
 def validate_channels_config_json(value: str, **kwargs):
     if not value:
@@ -82,10 +79,15 @@ def validate_channels_config_json(value: str, **kwargs):
     try:
         config: ChannelsConfigJson = json.loads(value)
     except json.JSONDecodeError:
-        raise ValidationError(_("Invalid JSON format. Please check for syntax errors."))
+        error_message = _("Invalid JSON format. Please check for syntax errors.")
+        logger.info(error_message)
+        raise ValidationError(error_message)
     except (TypeError, ValueError) as e:
-        raise ValidationError(_(f"Invalid JSON data: {e}"))
+        error_message = _(f"Invalid JSON data: {e}")
+        logger.info(error_message)
+        raise ValidationError(error_message)
     if "channels" in config and isinstance(config["channels"], list):
+        logger.info(f">>> _validate_recursive_filters")
         try:
             _validate_recursive_filters(config["channels"], "channels")
         except ValidationError as e:
@@ -312,7 +314,7 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
         if len(receiver) > 1:
             payload_copy["message_thread_id"] = receiver[1]
 
-        logger.debug("Sending message to %s" % receiver)
+        logger.info("Sending message to %s" % receiver)
         try:
             response = safe_urlopen(
                 method="POST",
@@ -473,18 +475,18 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
             config: ChannelsConfigJson = json.loads(config_json)
 
             if not isinstance(config, dict):
-                logger.error(
+                logger.info(
                     f"Channels configuration for project {project.slug} must be a dictionary."
                 )
                 return [], self.get_option("api_origin", project)
 
             if "channels" not in config or not isinstance(config["channels"], list):
-                logger.error(
+                logger.info(
                     f"Channels configuration for project {project.slug} must contain a 'channels' key with a list of channel objects."
                 )
                 return [], self.get_option("api_origin", project)
             if "api_origin" in config and not isinstance(config["api_origin"], str):
-                logger.error(
+                logger.info(
                     f"The 'api_origin' in Channels Configuration for project {project.slug} must be a string."
                 )
                 return [], self.get_option("api_origin", project)
@@ -493,13 +495,13 @@ class TelegramNotificationsPlugin(notify.NotificationPlugin):
                 "api_origin", self.get_option("api_origin", project)
             )
         except json.JSONDecodeError as e:
-            logger.error(
+            logger.info(
                 "Invalid JSON in channels_config_json for project %s: %s",
                 project.slug, e, exc_info=True
             )
             return [], self.get_option("api_origin", project)
         except Exception as e:
-            logger.error(
+            logger.info(
                 f"Unexpected error loading channels config for project {project.slug}: {e}",
                 exc_info=True,
             )
