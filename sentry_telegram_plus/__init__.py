@@ -3,6 +3,6 @@ Sentry интеграция (плагин) для перенаправления
 различных правил.
 """
 
-__version__ = '0.6.2'
+__version__ = '0.6.3'
 
 from .plugin import TelegramNotificationsPlugin
